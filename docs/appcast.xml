@@ -9,6 +9,22 @@
         <language>en</language>
 
         <item>
+            <title>Version 1.1</title>
+            <pubDate>Fri, 22 May 2026 14:22:29 +0000</pubDate>
+            <sparkle:version>1.1</sparkle:version>
+            <sparkle:shortVersionString>1.1</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Lossy PNG compression (TinyPNG-style via pngquant) — the quality slider now meaningfully shrinks PNG files. Smarter Squish button: only freshly imported or modified images are re-processed; already-compressed ones are left intact.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/louisprochwicz-beep/squish/releases/download/v1.1/Squish-1.1.dmg"
+                length="5217402"
+                type="application/octet-stream"
+                sparkle:edSignature="40yQhWob7oFBBDyxEL0fhqIUwVTA+D1YTuhl32rua2leFkhF84+XGWmzKQwrKEDUR0whLicOTgKL1xgaiiQHAQ==" length="5217402" />
+        </item>
+
+        <item>
             <title>Version 1.0</title>
             <pubDate>Fri, 22 May 2026 13:30:05 +0000</pubDate>
             <sparkle:version>1.0</sparkle:version>
