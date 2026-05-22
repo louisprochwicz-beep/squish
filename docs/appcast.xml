@@ -8,6 +8,23 @@
         <description>Most recent updates of Squish</description>
         <language>en</language>
 
+        <item>
+            <title>Version 1.0</title>
+            <pubDate>Fri, 22 May 2026 13:30:05 +0000</pubDate>
+            <sparkle:version>1.0</sparkle:version>
+            <sparkle:shortVersionString>1.0</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Initial public release</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/louisprochwicz-beep/squish/releases/download/v1.0/Squish-1.0.dmg"
+                length="4664962"
+                type="application/octet-stream"
+                sparkle:edSignature="FDe+MFd3S6QuP3Rakd3zjhKTpeWRC5om9yBCTTYOi3RPApFLs4i8hZoG74wD2/k4RrnEQhcXCo1GLBFiRVjABA==" length="4664962" />
+        </item>
+
+
         <!--
             Paste new <item> entries here (newest first).
             ./release.sh <version> generates them in build/appcast-entry-<version>.xml
