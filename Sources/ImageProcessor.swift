@@ -5,7 +5,7 @@ import CoreImage.CIFilterBuiltins
 import ImageIO
 import UniformTypeIdentifiers
 
-struct ProcessOptions {
+struct ProcessOptions: Equatable {
     var format: OutputFormat
     var quality: Double
     var targetWidth: Int?
@@ -79,6 +79,113 @@ enum ImageProcessor {
         guard let mainExe = Bundle.main.executableURL else { return nil }
         let candidate = mainExe.deletingLastPathComponent().appendingPathComponent("cwebp")
         return FileManager.default.isExecutableFile(atPath: candidate.path) ? candidate : nil
+    }
+
+    /// Returns the path to the bundled pngquant helper, or nil if not present.
+    private static func pngquantURL() -> URL? {
+        guard let mainExe = Bundle.main.executableURL else { return nil }
+        let candidate = mainExe.deletingLastPathComponent().appendingPathComponent("pngquant")
+        return FileManager.default.isExecutableFile(atPath: candidate.path) ? candidate : nil
+    }
+
+    /// Encodes a CGImage to PNG.
+    ///
+    /// - At quality ≥ 0.95 (top of the slider) → produce a LOSSLESS PNG via
+    ///   ImageIO so the user can still get pristine pixels.
+    /// - Below that → write a lossless PNG, then run pngquant for TinyPNG-style
+    ///   palette quantisation. pngquant maps the 0…1 slider to a min/max
+    ///   quality target: higher = more colours retained = larger file.
+    static func encodePNG(cgImage: CGImage, quality: Double, stripMetadata: Bool) throws -> Data {
+        // 1. Always start with a lossless PNG via ImageIO
+        let losslessData = NSMutableData()
+        guard let dest = CGImageDestinationCreateWithData(
+            losslessData,
+            UTType.png.identifier as CFString,
+            1,
+            nil
+        ) else {
+            throw NSError(domain: "Squish", code: 30, userInfo: [
+                NSLocalizedDescriptionKey: "Cannot create PNG destination"
+            ])
+        }
+
+        var props: [CFString: Any] = [:]
+        if stripMetadata {
+            props[kCGImageMetadataShouldExcludeGPS] = true
+            props[kCGImageDestinationMetadata] = CGImageMetadataCreateMutable()
+        }
+        CGImageDestinationAddImage(dest, cgImage, props as CFDictionary)
+        guard CGImageDestinationFinalize(dest) else {
+            throw NSError(domain: "Squish", code: 31, userInfo: [
+                NSLocalizedDescriptionKey: "PNG encoding failed"
+            ])
+        }
+
+        // 2. Top of slider → keep lossless (pristine)
+        if quality >= 0.95 {
+            return losslessData as Data
+        }
+
+        // 3. Below threshold → run pngquant. If unavailable, fall back to lossless.
+        guard let pngquant = pngquantURL() else {
+            return losslessData as Data
+        }
+
+        // Map quality 0…0.95 to pngquant --quality min-max
+        //   1.00 → 90-100  (essentially lossless visually)
+        //   0.80 → 70-90   (TinyPNG default sweet spot)
+        //   0.60 → 50-80
+        //   0.40 → 30-65
+        //   0.20 → 10-45
+        //   0.05 → 0-30    (aggressive)
+        let qPct = max(0, min(100, Int((quality * 100).rounded())))
+        let qMax = max(30, min(100, qPct + 10))
+        let qMin = max(0,  min(qMax - 20, qPct - 20))
+
+        let tempDir = FileManager.default.temporaryDirectory
+        let id = UUID().uuidString
+        let inURL  = tempDir.appendingPathComponent("squish-\(id)-in.png")
+        let outURL = tempDir.appendingPathComponent("squish-\(id)-out.png")
+        defer {
+            try? FileManager.default.removeItem(at: inURL)
+            try? FileManager.default.removeItem(at: outURL)
+        }
+        try (losslessData as Data).write(to: inURL)
+
+        let task = Process()
+        task.executableURL = pngquant
+        task.arguments = [
+            "--quality", "\(qMin)-\(qMax)",
+            "--speed", "3",            // 1 = slow/best, 11 = fast/worst. 3 ≈ default.
+            "--strip",                 // remove optional PNG chunks for size
+            "--force",                 // overwrite output if it exists
+            "--output", outURL.path,
+            inURL.path
+        ]
+        let errPipe = Pipe()
+        task.standardError = errPipe
+        task.standardOutput = Pipe()
+
+        do {
+            try task.run()
+            task.waitUntilExit()
+        } catch {
+            return losslessData as Data
+        }
+
+        // pngquant exits 99 when the result would exceed the quality ceiling
+        // (--quality min-max with min not met). In that case fall back to the
+        // lossless original rather than failing the whole export.
+        if task.terminationStatus != 0 {
+            return losslessData as Data
+        }
+
+        guard let quantised = try? Data(contentsOf: outURL), !quantised.isEmpty else {
+            return losslessData as Data
+        }
+
+        // Only keep the quantised version if it's actually smaller.
+        return quantised.count < losslessData.length ? quantised : (losslessData as Data)
     }
 
     /// Encodes a CGImage to WEBP using the bundled cwebp.
@@ -260,6 +367,17 @@ enum ImageProcessor {
             return ProcessResult(data: data, ext: "webp", pixelSize: outCG.size)
         }
 
+        // PNG path → pngquant helper for TinyPNG-style lossy palette quantisation
+        // (at quality ≥ 0.95 it stays lossless).
+        if resolvedFormat == .png {
+            let data = try encodePNG(
+                cgImage: outCG,
+                quality: options.quality,
+                stripMetadata: options.stripMetadata
+            )
+            return ProcessResult(data: data, ext: "png", pixelSize: outCG.size)
+        }
+
         // All other formats → standard ImageIO path
         guard let utType = resolvedFormat.utType ?? defaultUTType(for: url) else {
             throw NSError(domain: "Squish", code: 3, userInfo: [NSLocalizedDescriptionKey: "Unknown output format"])
@@ -337,6 +455,14 @@ enum ImageProcessor {
                 stripMetadata: options.stripMetadata
             ) else { return nil }
             thumbBytes = webpData.count
+        } else if resolvedFormat == .png {
+            // PNG estimation routes through pngquant helper
+            guard let pngData = try? encodePNG(
+                cgImage: cg,
+                quality: options.quality,
+                stripMetadata: options.stripMetadata
+            ) else { return nil }
+            thumbBytes = pngData.count
         } else {
             guard let utType = resolvedFormat.utType ?? defaultUTType(for: url) else { return nil }
 

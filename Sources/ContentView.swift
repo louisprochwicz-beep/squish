@@ -161,39 +161,43 @@ struct ContentView: View {
 
     private func processAll() {
         guard !state.isProcessing else { return }
+        // Snapshot the set of items that need work RIGHT NOW. Anything
+        // already up-to-date is left alone — see AppState.needsProcessing().
+        let pending = state.pendingItems
+        guard !pending.isEmpty else { return }
+
+        // Record the "before" byte total for each pending item so the toast
+        // can show a saving figure that reflects THIS batch only (not the
+        // cumulative savings of every squish that's ever run on the items).
+        let originalBytesThisBatch = pending.reduce(0) { $0 + $1.originalBytes }
+
         state.isProcessing = true
         state.processingTask?.cancel()
         state.processingTask = Task {
-            for item in state.items {
+            var processedThisBatch: [ImageItem] = []
+            for item in pending {
                 if Task.isCancelled { break }
-                await processOne(item)
+                let ok = await processOne(item)
+                if ok { processedThisBatch.append(item) }
             }
             state.isProcessing = false
             state.processingTask = nil
             if Task.isCancelled { return }
 
-            // Success toast — show count + total bytes saved
-            let processedCount = state.items.filter { $0.processedBytes != nil }.count
-            guard processedCount > 0 else { return }
-            let saved = max(0, state.totalOriginalBytes - state.totalProcessedBytes)
-            let plural = processedCount > 1 ? "s" : ""
+            guard !processedThisBatch.isEmpty else { return }
+            let processedBytesThisBatch = processedThisBatch.reduce(0) { $0 + ($1.processedBytes ?? 0) }
+            let saved = max(0, originalBytesThisBatch - processedBytesThisBatch)
+            let count = processedThisBatch.count
+            let plural = count > 1 ? "s" : ""
             let savedStr = Theme.formatBytes(saved)
-            state.showToast(.success("\(processedCount) image\(plural) squished · saved \(savedStr)"))
+            state.showToast(.success("\(count) image\(plural) squished · saved \(savedStr)"))
         }
     }
 
-    private func processOne(_ item: ImageItem) async {
+    /// Returns true if the item was successfully (re-)processed.
+    private func processOne(_ item: ImageItem) async -> Bool {
         item.status = .processing
-        let opts = ProcessOptions(
-            format: state.outputFormat,
-            quality: state.quality,
-            targetWidth: state.targetWidth,
-            targetHeight: state.targetHeight,
-            stripMetadata: state.stripMetadata,
-            rotationDegrees: item.rotationDegrees,
-            flipHorizontal: item.flipHorizontal,
-            cropRectNormalized: item.cropRectNormalized
-        )
+        let opts = state.currentOptions(for: item)
         let url = item.sourceURL
         do {
             let result = try await Task.detached(priority: .userInitiated) {
@@ -203,9 +207,14 @@ struct ContentView: View {
             item.processedBytes = result.data.count
             item.processedExtension = result.ext
             item.processedPixelSize = result.pixelSize
+            // Stamp the snapshot LAST so needsProcessing() flips to "false"
+            // only after every other field is in place.
+            item.lastProcessedOptions = opts
             item.status = .done
+            return true
         } catch {
             item.status = .failed(error.localizedDescription)
+            return false
         }
     }
 

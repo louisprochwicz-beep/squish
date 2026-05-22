@@ -48,24 +48,44 @@ struct BottomBar: View {
 
     @ViewBuilder
     private var primaryAction: some View {
-        // Show the pending-item count next to Squish only (not after processing).
-        // A matching invisible badge on the LEFT keeps the button itself
-        // pixel-perfectly centered inside the bottom bar.
-        let showCount = !state.anyProcessed && !state.items.isEmpty
+        // Show the pending-item count next to Squish whenever there's work
+        // to do (a never-squished image OR an item whose settings changed
+        // since its last squish). A matching invisible badge on the LEFT
+        // keeps the Squish button pixel-perfectly centered in the bottom bar.
+        let showCount = state.hasPending && !state.isProcessing
+        let count = state.pendingCount
         HStack(spacing: 10) {
             if showCount {
-                CountBadge(count: state.items.count).opacity(0).allowsHitTesting(false)
+                CountBadge(count: count).opacity(0).allowsHitTesting(false)
             }
             primaryButton
             if showCount {
-                CountBadge(count: state.items.count)
+                CountBadge(count: count)
             }
         }
     }
 
     @ViewBuilder
     private var primaryButton: some View {
-        if state.anyProcessed && !state.isProcessing {
+        // Three states, in priority order:
+        //   1. Currently processing → "Squishing…" (spinner)
+        //   2. Anything pending (new import OR stale settings) → "Squish"
+        //   3. Everything up-to-date → "Save"
+        if state.isProcessing {
+            BigPillButton(symbol: "circle.dotted",
+                          label: "Squishing…",
+                          enabled: false,
+                          loading: true) {
+                processAll()
+            }
+        } else if state.hasPending {
+            BigPillButton(symbol: "squish-logo",
+                          label: "Squish",
+                          enabled: !state.items.isEmpty,
+                          loading: false) {
+                processAll()
+            }
+        } else if state.anyProcessed {
             BigPillButton(symbol: "square.and.arrow.down",
                           label: "Save",
                           enabled: true,
@@ -73,10 +93,11 @@ struct BottomBar: View {
                 saveAll()
             }
         } else {
-            BigPillButton(symbol: state.isProcessing ? "circle.dotted" : "squish-logo",
-                          label: state.isProcessing ? "Squishing…" : "Squish",
-                          enabled: !state.items.isEmpty && !state.isProcessing,
-                          loading: state.isProcessing) {
+            // Empty state (no items) — disabled Squish placeholder
+            BigPillButton(symbol: "squish-logo",
+                          label: "Squish",
+                          enabled: false,
+                          loading: false) {
                 processAll()
             }
         }

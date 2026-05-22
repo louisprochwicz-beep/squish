@@ -1,6 +1,7 @@
 import Foundation
 import SwiftUI
 import UniformTypeIdentifiers
+import Combine
 
 enum OutputFormat: String, CaseIterable, Identifiable {
     case keepOriginal = "Original"
@@ -31,11 +32,10 @@ enum OutputFormat: String, CaseIterable, Identifiable {
         }
     }
 
+    /// PNG is lossless via ImageIO but Squish bundles pngquant for TinyPNG-style
+    /// palette quantisation — so the quality slider IS meaningful for PNG too.
     var supportsQuality: Bool {
-        switch self {
-        case .png: return false
-        default:   return true
-        }
+        return true
     }
 
     var symbol: String {
@@ -94,6 +94,13 @@ final class AppState: ObservableObject {
     /// user clears all items mid-processing).
     var processingTask: Task<Void, Never>?
 
+    /// Combine subscriptions forwarding each ImageItem's `objectWillChange`
+    /// to ours. SwiftUI views that observe AppState (e.g. BottomBar) don't
+    /// automatically re-render when a per-item @Published changes — without
+    /// this bridge the pending badge wouldn't refresh after a rotate / crop
+    /// / processed-data update on an item.
+    private var itemCancellables: [UUID: AnyCancellable] = [:]
+
     // Resize behaviour is now implicit:
     //   • one dim filled  → proportional resize (image aspect ratio preserved)
     //   • both dims filled → scale-to-fill + center crop to exact W × H
@@ -110,6 +117,39 @@ final class AppState: ObservableObject {
         items.contains { $0.processedBytes != nil }
     }
 
+    /// Build the ProcessOptions that *would* be applied to `item` right now,
+    /// given the current global settings + the item's per-instance edits.
+    /// Used both by processOne() and by needsProcessing(_:) to compare against
+    /// the snapshot taken at the last successful squish.
+    func currentOptions(for item: ImageItem) -> ProcessOptions {
+        ProcessOptions(
+            format: outputFormat,
+            quality: quality,
+            targetWidth: targetWidth,
+            targetHeight: targetHeight,
+            stripMetadata: stripMetadata,
+            rotationDegrees: item.rotationDegrees,
+            flipHorizontal: item.flipHorizontal,
+            cropRectNormalized: item.cropRectNormalized
+        )
+    }
+
+    /// An item is "pending" if it has never been squished OR if any of the
+    /// settings that affect the output have changed since the last squish.
+    /// This is what drives the Squish/Save button switch and the badge count.
+    func needsProcessing(_ item: ImageItem) -> Bool {
+        guard item.processedData != nil,
+              let last = item.lastProcessedOptions else { return true }
+        return last != currentOptions(for: item)
+    }
+
+    var pendingItems: [ImageItem] {
+        items.filter { needsProcessing($0) }
+    }
+
+    var pendingCount: Int { pendingItems.count }
+    var hasPending: Bool { !pendingItems.isEmpty }
+
     /// Accepts any mix of file and folder URLs. Folders are expanded
     /// recursively, keeping only files with a supported image extension.
     func addItems(from urls: [URL]) {
@@ -118,10 +158,22 @@ final class AppState: ObservableObject {
             if items.contains(where: { $0.sourceURL == url }) { continue }
             if let item = ImageItem(url: url) {
                 items.append(item)
+                subscribeToItemChanges(item)
                 Task { await loadThumbnail(for: item) }
             }
         }
         scheduleEstimates()
+    }
+
+    /// Bridge per-item @Published changes (rotation, crop, processedData…)
+    /// to AppState's own objectWillChange so views observing AppState — most
+    /// notably BottomBar — re-render on per-item updates. Held weakly to
+    /// avoid retain cycles.
+    private func subscribeToItemChanges(_ item: ImageItem) {
+        itemCancellables[item.id] = item.objectWillChange
+            .sink { [weak self] in
+                self?.objectWillChange.send()
+            }
     }
 
     private static let supportedExtensions: Set<String> = [
@@ -154,6 +206,8 @@ final class AppState: ObservableObject {
     }
 
     func removeItem(_ item: ImageItem) {
+        itemCancellables[item.id]?.cancel()
+        itemCancellables.removeValue(forKey: item.id)
         items.removeAll { $0.id == item.id }
     }
 
@@ -163,6 +217,8 @@ final class AppState: ObservableObject {
         processingTask = nil
         estimateTask?.cancel()
         estimateTask = nil
+        itemCancellables.values.forEach { $0.cancel() }
+        itemCancellables.removeAll()
         items.removeAll()
     }
 

@@ -29,6 +29,12 @@ final class ImageItem: ObservableObject, Identifiable {
     @Published var cropRectNormalized: CGRect? = nil  // 0..1 coords
     @Published var estimatedBytes: Int? = nil   // live preview of compressed size
     @Published var estimating: Bool = false
+    /// Snapshot of the options that were used the last time this item was
+    /// successfully processed. Compared against the *current* options to
+    /// detect whether the item is "stale" and needs to be re-squished — e.g.
+    /// because the user changed the format, the quality slider, the target
+    /// W/H, or re-cropped/rotated the image since the previous Squish.
+    @Published var lastProcessedOptions: ProcessOptions? = nil
 
     init?(url: URL) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),

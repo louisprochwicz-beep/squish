@@ -292,16 +292,20 @@ struct QualityPill: View {
             }
             .allowsHitTesting(false)
 
-            // Labels on top of both layers
+            // Labels on top of both layers — when the format doesn't support
+            // a quality knob (PNG = lossless), surface that with a clear
+            // "Lossless" label instead of a stale "Quality XX%" reading.
             HStack {
-                Text("Quality")
+                Text(disabled ? "Lossless" : "Quality")
                     .font(.system(size: 13, weight: .semibold))
                     .foregroundStyle(.white)
                 Spacer()
-                Text("\(Int(value * 100))%")
-                    .font(.system(size: 13, weight: .semibold))
-                    .monospacedDigit()
-                    .foregroundStyle(.white)
+                if !disabled {
+                    Text("\(Int(value * 100))%")
+                        .font(.system(size: 13, weight: .semibold))
+                        .monospacedDigit()
+                        .foregroundStyle(.white)
+                }
             }
             .padding(.horizontal, 14)
             .allowsHitTesting(false)
@@ -320,9 +324,9 @@ struct QualityPill: View {
                 .onEnded { _ in isDragging = false }
         )
         .onHover { hovering = $0; if !disabled { updateCursor($0) } }
-        .opacity(disabled ? 0.5 : 1.0)
+        .opacity(disabled ? 0.55 : 1.0)
         .animation(.easeOut(duration: 0.10), value: hovering)
-        .help(disabled ? "Quality is locked for PNG (lossless)" : "Drag to adjust quality")
+        .help(disabled ? "PNG is a lossless format — no quality knob" : "Drag to adjust quality")
     }
 
     private var fillColor: Color {

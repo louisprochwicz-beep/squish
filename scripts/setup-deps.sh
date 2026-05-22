@@ -38,5 +38,38 @@ else
     echo "→ cwebp already present (skipping)"
 fi
 
+# --- pngquant helper (TinyPNG-style lossy PNG compression) ---------------
+# Built from source via cargo. No pre-built arm64 binary is officially
+# distributed, so we compile once on first checkout (~30 seconds).
+if [ ! -f "$ROOT/vendor/bin/pngquant" ]; then
+    CARGO="$(command -v cargo || true)"
+    if [ -z "$CARGO" ] && [ -x "$HOME/.cargo/bin/cargo" ]; then
+        CARGO="$HOME/.cargo/bin/cargo"
+    fi
+    if [ -z "$CARGO" ]; then
+        echo "✗ pngquant needs Rust to build, but cargo wasn't found."
+        echo "  Install Rust (no sudo, no Homebrew) with:"
+        echo "    curl --proto '=https' --tlsv1.2 -sSf https://sh.rustup.rs | sh -s -- -y --default-toolchain stable --profile minimal --no-modify-path"
+        echo "  Then re-run this script."
+        echo
+        echo "  Note: Squish will still build & run without pngquant — PNG"
+        echo "  export will simply fall back to lossless encoding."
+    else
+        echo "→ Building pngquant from source (Rust)…"
+        TMP_BUILD="/tmp/squish-pngquant-build-$$"
+        rm -rf "$TMP_BUILD"
+        git clone --depth 1 --recurse-submodules \
+            https://github.com/kornelski/pngquant.git "$TMP_BUILD" >/dev/null 2>&1
+        ( cd "$TMP_BUILD" && "$CARGO" build --release ) >/dev/null
+        mkdir -p "$ROOT/vendor/bin"
+        cp "$TMP_BUILD/target/release/pngquant" "$ROOT/vendor/bin/pngquant"
+        chmod +x "$ROOT/vendor/bin/pngquant"
+        rm -rf "$TMP_BUILD"
+        echo "  ✓ pngquant installed at vendor/bin/pngquant"
+    fi
+else
+    echo "→ pngquant already present (skipping)"
+fi
+
 echo
 echo "✓ All build dependencies ready. You can now run ./build.sh"

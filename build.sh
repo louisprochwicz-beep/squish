@@ -44,6 +44,14 @@ if [ -f "$ROOT/vendor/bin/cwebp" ]; then
     chmod +x "$APP_DIR/Contents/MacOS/cwebp"
 fi
 
+# Embed pngquant helper binary — for TinyPNG-style lossy PNG compression.
+# Without it, PNG export falls back to ImageIO's lossless encoder.
+if [ -f "$ROOT/vendor/bin/pngquant" ]; then
+    echo "→ Embedding pngquant helper"
+    cp "$ROOT/vendor/bin/pngquant" "$APP_DIR/Contents/MacOS/pngquant"
+    chmod +x "$APP_DIR/Contents/MacOS/pngquant"
+fi
+
 echo "→ Embedding Sparkle.framework"
 cp -R "$SPARKLE_FRAMEWORK" "$APP_DIR/Contents/Frameworks/"
 
@@ -85,6 +93,10 @@ codesign --force --deep --sign - --timestamp=none "$APP_DIR/Contents/Frameworks/
 # Sign cwebp helper binary
 if [ -f "$APP_DIR/Contents/MacOS/cwebp" ]; then
     codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/cwebp"
+fi
+# Sign pngquant helper binary
+if [ -f "$APP_DIR/Contents/MacOS/pngquant" ]; then
+    codesign --force --sign - --timestamp=none "$APP_DIR/Contents/MacOS/pngquant"
 fi
 codesign --force --deep --sign - --timestamp=none "$APP_DIR"
 echo "    ✓ signed"
