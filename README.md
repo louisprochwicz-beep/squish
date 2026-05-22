@@ -16,14 +16,38 @@ Requires macOS 14 (Sonoma) or later — Apple Silicon.
 
 ### First launch — Gatekeeper bypass
 
-Squish is signed but not (yet) notarised through Apple's Developer Program, so the **first time** you open it macOS will say "Squish can't be opened because it is from an unidentified developer". This is normal:
+Squish is signed but not (yet) notarised through Apple's Developer Program, so the **first time** you open it macOS will warn "Apple could not verify Squish is free of malware". This is normal — choose whichever method matches your macOS version:
 
-1. Open Finder → **Applications**
+#### macOS 15 Sequoia or later  (the current procedure)
+
+1. Double-click **Squish.app** → macOS blocks with the warning popup → click **Done**
+2. Open **System Settings** → **Privacy & Security**
+3. Scroll down to the **Security** section. You'll see:
+   > *"Squish was blocked from use because it is not from an identified developer."*
+4. Click **Open Anyway**
+5. Authenticate with Touch ID or admin password
+6. One last popup → click **Open**
+
+macOS whitelists the app from now on — no more prompts, including for future auto-updates.
+
+#### macOS 14 Sonoma
+
+The classic right-click trick still works on Sonoma:
+
+1. Finder → **Applications**
 2. **Right-click** (or `Ctrl`-click) on **Squish.app**
 3. Choose **Open**
-4. In the popup, click **Open** again
+4. In the popup → **Open**
 
-That's it — macOS whitelists the app permanently and never asks again. All subsequent launches (including future auto-updates) bypass Gatekeeper.
+#### Quick way for all versions (Terminal)
+
+If you're comfortable with the command line, one command bypasses everything:
+
+```bash
+xattr -dr com.apple.quarantine /Applications/Squish.app
+```
+
+This removes the "downloaded from internet" quarantine flag. Squish will launch normally on every double-click after that.
 
 ## Features
 
