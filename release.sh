@@ -32,8 +32,14 @@ mv "$DMG_SRC" "$DMG_STABLE"
 
 # 4. Sign the update via Sparkle EdDSA (private key pulled from Keychain)
 echo "→ Signing update"
-SIGN_OUTPUT=$("$ROOT/vendor/Sparkle/bin/sign_update" "$DMG_VERSIONED")
 # sign_update prints e.g.  sparkle:edSignature="..." length="..."
+# We extract ONLY the edSignature attribute — embedding the full output would
+# duplicate `length` in the <enclosure> tag (which we write ourselves below)
+# and Sparkle's strict XML parser rejects appcasts with duplicate attributes
+# with a generic "Update Error" popup. (v1.0 → v1.1 update broke on exactly
+# this; do not regress.)
+SIGN_OUTPUT_RAW=$("$ROOT/vendor/Sparkle/bin/sign_update" "$DMG_VERSIONED")
+ED_SIGNATURE=$(echo "$SIGN_OUTPUT_RAW" | sed -E 's/.*(sparkle:edSignature="[^"]+").*/\1/')
 SIZE=$(stat -f%z "$DMG_VERSIONED")
 PUB_DATE=$(LC_ALL=en_US.UTF-8 date -u +"%a, %d %b %Y %H:%M:%S +0000")
 
@@ -61,7 +67,7 @@ cat > "$ENTRY_FILE" <<EOF
                 url="$DOWNLOAD_URL"
                 length="$SIZE"
                 type="application/octet-stream"
-                $SIGN_OUTPUT />
+                $ED_SIGNATURE />
         </item>
 EOF
 
