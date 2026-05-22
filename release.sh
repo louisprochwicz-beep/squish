@@ -21,9 +21,14 @@ echo "→ Bumping version to $VERSION"
 echo "→ Building"
 "$ROOT/build.sh"
 
-# 3. Rename DMG with version
+# 3. Versioned DMG name (kept for clarity in the GitHub releases page).
+# We also keep a stable Squish.dmg copy so the URL
+# https://github.com/USER/REPO/releases/latest/download/Squish.dmg
+# always points to the most recent build without changing.
 DMG_VERSIONED="$ROOT/build/Squish-$VERSION.dmg"
-mv "$DMG_SRC" "$DMG_VERSIONED"
+DMG_STABLE="$ROOT/build/Squish.dmg"
+cp "$DMG_SRC" "$DMG_VERSIONED"
+mv "$DMG_SRC" "$DMG_STABLE"
 
 # 4. Sign the update via Sparkle EdDSA (private key pulled from Keychain)
 echo "→ Signing update"
@@ -69,8 +74,13 @@ echo "  Size:   $(du -h "$DMG_VERSIONED" | awk '{print $1}')"
 echo "  Entry:  $ENTRY_FILE"
 echo
 echo "  Next steps:"
-echo "    1. Upload $DMG_VERSIONED to GitHub Releases at tag v$VERSION"
-echo "       gh release create v$VERSION \"$DMG_VERSIONED\" --notes \"$NOTES\""
+echo "    1. Create the GitHub release and upload BOTH DMGs:"
+echo "       gh release create v$VERSION \\"
+echo "           \"$DMG_VERSIONED\" \\"
+echo "           \"$DMG_STABLE\" \\"
+echo "           --title \"v$VERSION\" --notes \"$NOTES\""
+echo "       (The versioned name is for clarity on the releases page,"
+echo "        Squish.dmg is what the stable /latest/download URL serves.)"
 echo "    2. Insert the contents of $ENTRY_FILE at the TOP of docs/appcast.xml"
 echo "       (just below <language>en</language>)"
 echo "    3. Commit and push → GitHub Pages serves the new appcast"
