@@ -9,6 +9,22 @@
         <language>en</language>
 
         <item>
+            <title>Version 1.2</title>
+            <pubDate>Fri, 22 May 2026 15:30:09 +0000</pubDate>
+            <sparkle:version>1.2</sparkle:version>
+            <sparkle:shortVersionString>1.2</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Better light-mode contrast across the toolbar pills. Rename your images directly from the editor — click the filename to edit it inline. Cleaner native typography across all card overlays and badges.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/louisprochwicz-beep/squish/releases/download/v1.2/Squish-1.2.dmg"
+                length="5234900"
+                type="application/octet-stream"
+                sparkle:edSignature="dYptvfKlBTYUf+ok2LFzu4Ar0NA4PJONXvdfC68f9eLHIPBD2ceDDlLzCoYQNZ01eSvSgLlDeW8SJjT5OK3YCQ==" />
+        </item>
+
+        <item>
             <title>Version 1.1</title>
             <pubDate>Fri, 22 May 2026 14:22:29 +0000</pubDate>
             <sparkle:version>1.1</sparkle:version>
