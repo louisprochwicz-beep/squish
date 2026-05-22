@@ -1,0 +1,11 @@
+build/
+.DS_Store
+*.xcuserstate
+.swiftpm/
+backup-private-key.txt
+
+# Intermediate iconset (only the compiled AppIcon.icns is needed)
+Resources/AppIcon.iconset/
+
+# Keep Sparkle vendored, but ignore the original archive
+vendor/Sparkle.tar.xz
