@@ -96,7 +96,7 @@ struct ImageCardView: View {
     private var topRow: some View {
         HStack(alignment: .top) {
             Text(item.displayName)
-                .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                .font(.system(size: 11, weight: .semibold))
                 .lineLimit(1)
                 .truncationMode(.middle)
                 .padding(.horizontal, 8)
@@ -266,7 +266,11 @@ struct BadgeStack: View {
                     .fontWeight(.semibold)
             }
         }
-        .font(.system(size: 12, weight: .medium, design: .monospaced))
+        // SF (system) font + monospacedDigit so before/after rows of digits
+        // (e.g. "153 KB" stacked over "~242 KB" or "1920×1080" rows) stay
+        // aligned without the heavier code-style look of full .monospaced.
+        .font(.system(size: 12, weight: .medium))
+        .monospacedDigit()
         .padding(.horizontal, 9)
         .padding(.vertical, 5)
         .background(

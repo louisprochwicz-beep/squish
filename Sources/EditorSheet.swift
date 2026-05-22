@@ -41,14 +41,7 @@ struct EditorSheet: View {
 
     private var header: some View {
         HStack {
-            HStack(spacing: 8) {
-                Image(systemName: "slider.horizontal.3")
-                    .foregroundStyle(Theme.accent)
-                Text("Edit · \(item.displayName)")
-                    .font(.system(size: 13, weight: .semibold))
-                    .lineLimit(1)
-                    .truncationMode(.middle)
-            }
+            EditableFilenameField(item: item)
             Spacer()
             HoverCloseButton { onDismiss() }
         }
@@ -132,7 +125,7 @@ struct EditorSheet: View {
                 }
                 if cropEnabled {
                     Text(String(format: "%.0f%% × %.0f%%", cropRect.width * 100, cropRect.height * 100))
-                        .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                        .font(.system(size: 11, weight: .semibold))
                         .foregroundStyle(Theme.textSecondary)
                         .monospacedDigit()
                     Button("Reset") {
@@ -173,6 +166,138 @@ struct EditorSheet: View {
 
     private func editButton(_ symbol: String, help: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         EditorIconButton(symbol: symbol, help: help, active: active, action: action)
+    }
+}
+
+// MARK: - Inline-editable filename in the editor header
+//
+// Behaviour:
+//   • idle  → displays the filename as plain text
+//   • hover → a subtle gray "chip" background appears and a small pencil
+//             icon fades in to signal that the name is clickable
+//   • click → swaps to a TextField with the basename pre-loaded and the
+//             field auto-focused. The source extension stays visible to
+//             the right of the field (greyed) so the user knows what
+//             they're editing — Squish never renames the original file.
+//   • Enter / blur → commits a non-empty value to item.customBaseName,
+//                    sanitising any path-separator characters that would
+//                    break the eventual export filename.
+//   • Esc → cancels and reverts to the previous value.
+//
+// We don't modify the on-disk source; customBaseName only changes what
+// the editor + card show and what the exported file is named.
+struct EditableFilenameField: View {
+    @ObservedObject var item: ImageItem
+
+    @State private var isEditing = false
+    @State private var draft: String = ""
+    @State private var hovering = false
+    @FocusState private var focused: Bool
+
+    var body: some View {
+        HStack(spacing: 6) {
+            // The editable basename + (always-visible, non-editable) extension.
+            // Wrapping both in the same HStack keeps them on one baseline and
+            // prevents the layout from jumping when toggling edit mode.
+            HStack(spacing: 0) {
+                if isEditing {
+                    TextField("", text: $draft)
+                        .textFieldStyle(.plain)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .focused($focused)
+                        .fixedSize()
+                        .onSubmit { commit() }
+                        // SwiftUI on macOS routes the Esc key through
+                        // .onExitCommand — restores the previous value.
+                        .onExitCommand { cancel() }
+                        // Blur (click outside, switch field) also commits,
+                        // matching macOS Finder rename behaviour.
+                        .onChange(of: focused) { _, isFocused in
+                            if !isFocused && isEditing { commit() }
+                        }
+                } else {
+                    Text(item.editableBaseName)
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textPrimary)
+                        .lineLimit(1)
+                        .truncationMode(.middle)
+                }
+
+                if !item.sourceExtension.isEmpty {
+                    Text(".\(item.sourceExtension)")
+                        .font(.system(size: 13, weight: .semibold))
+                        .foregroundStyle(Theme.textSecondary)
+                        .lineLimit(1)
+                }
+            }
+
+            // Pencil hint — fades in on hover only when not already editing,
+            // so it doesn't compete with the active TextField for attention.
+            if hovering && !isEditing {
+                Image(systemName: "pencil")
+                    .font(.system(size: 11, weight: .medium))
+                    .foregroundStyle(Theme.textTertiary)
+                    .transition(.opacity)
+            }
+        }
+        .padding(.horizontal, 8)
+        .padding(.vertical, 4)
+        .background(
+            RoundedRectangle(cornerRadius: 6, style: .continuous)
+                .fill(backgroundFill)
+        )
+        .contentShape(Rectangle())
+        // A single tap anywhere on the chip area enters edit mode. We
+        // skip the hit-test when the field is already focused so the
+        // TextField itself receives clicks for cursor placement.
+        .onTapGesture {
+            if !isEditing { startEditing() }
+        }
+        .onHover { isHovering in
+            hovering = isHovering
+            if !isEditing { updateCursor(isHovering) }
+        }
+        .animation(.easeOut(duration: 0.12), value: hovering)
+        .animation(.easeOut(duration: 0.12), value: isEditing)
+        .help(isEditing ? "Press Return to save, Escape to cancel" : "Click to rename")
+    }
+
+    private var backgroundFill: Color {
+        if isEditing { return Theme.surface2 }
+        return hovering ? Theme.surface2 : Color.clear
+    }
+
+    private func startEditing() {
+        draft = item.editableBaseName
+        isEditing = true
+        // SwiftUI needs one runloop tick after the view reflows from
+        // Text → TextField before focus can land on the new field.
+        DispatchQueue.main.async { focused = true }
+    }
+
+    private func commit() {
+        let trimmed = draft.trimmingCharacters(in: .whitespacesAndNewlines)
+        // Empty → leave the previous name untouched (we don't allow blanks).
+        guard !trimmed.isEmpty else {
+            isEditing = false
+            return
+        }
+        // Strip filesystem-illegal characters so the eventual export path
+        // is always writable. `/` and `:` are the two macOS will choke on.
+        let sanitized = trimmed
+            .replacingOccurrences(of: "/", with: "-")
+            .replacingOccurrences(of: ":", with: "-")
+        // Treat re-typing the same name as a no-op (avoid an unnecessary
+        // pending-options flip).
+        if sanitized != item.editableBaseName {
+            item.customBaseName = sanitized
+        }
+        isEditing = false
+    }
+
+    private func cancel() {
+        isEditing = false
     }
 }
 

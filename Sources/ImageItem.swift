@@ -35,6 +35,11 @@ final class ImageItem: ObservableObject, Identifiable {
     /// because the user changed the format, the quality slider, the target
     /// W/H, or re-cropped/rotated the image since the previous Squish.
     @Published var lastProcessedOptions: ProcessOptions? = nil
+    /// Optional user-supplied basename (without extension) set via the
+    /// inline rename field in the editor. nil → use the source file's
+    /// basename. The source file on disk is NEVER renamed; this only
+    /// affects what the editor & card show, and the exported file's name.
+    @Published var customBaseName: String? = nil
 
     init?(url: URL) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),
@@ -61,7 +66,24 @@ final class ImageItem: ObservableObject, Identifiable {
         }
     }
 
-    var displayName: String { sourceURL.lastPathComponent }
+    /// The basename (without extension) the user sees & can edit. Falls
+    /// back to the source file's basename when no custom name is set.
+    var editableBaseName: String {
+        customBaseName ?? sourceURL.deletingPathExtension().lastPathComponent
+    }
+
+    /// File extension from the source (kept stable in the editor header
+    /// so the user knows what they're editing). The actual exported file
+    /// extension is determined by the chosen output format and may differ.
+    var sourceExtension: String { sourceURL.pathExtension }
+
+    /// Full filename as shown in the card overlay and elsewhere
+    /// (basename + extension). Honours customBaseName when set.
+    var displayName: String {
+        let base = editableBaseName
+        let ext = sourceExtension
+        return ext.isEmpty ? base : "\(base).\(ext)"
+    }
 
     var savings: Double? {
         guard let p = processedBytes else { return nil }

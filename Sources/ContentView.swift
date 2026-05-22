@@ -237,7 +237,9 @@ struct ContentView: View {
             for item in processed {
                 guard let data = item.processedData,
                       let ext = item.processedExtension else { continue }
-                let base = item.sourceURL.deletingPathExtension().lastPathComponent
+                // Honour any user-supplied name from the editor's rename
+                // field; fall back to the source file's basename.
+                let base = item.editableBaseName
                 var filename = "\(base)-squish.\(ext)"
                 var target = dir.appendingPathComponent(filename)
                 var n = 2

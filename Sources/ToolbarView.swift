@@ -132,8 +132,12 @@ struct FormatOption: View {
 
                 if let ext = format.fileExtension.isEmpty ? nil : format.fileExtension.uppercased() {
                     Text(".\(ext)")
-                        .font(.system(size: 10, weight: .medium, design: .monospaced))
-                        .foregroundStyle(.white.opacity(0.45))
+                        .font(.system(size: 10, weight: .medium))
+                        // Was `.white.opacity(0.45)` — invisible against the
+                        // light system popover background in light mode.
+                        // tertiaryLabelColor renders as a faint gray in both
+                        // appearances.
+                        .foregroundStyle(Theme.textTertiary)
                 }
             }
             .padding(.horizontal, 10)
@@ -196,7 +200,11 @@ struct DimensionHalf: View {
         HStack(spacing: 6) {
             Text(label)
                 .font(.system(size: 13, weight: .semibold))
-                .foregroundStyle(.white)
+                // Adapts to pill background: white on the accent fill (active)
+                // and labelColor (= black in light, white in dark) on the
+                // gray track (inactive). Was previously hardcoded white
+                // → invisible on the light-mode gray track.
+                .foregroundStyle(Theme.pillContent(active: isActive))
                 .fixedSize()
 
             // No `prompt:` — the "px" lives EXTERNALLY below as a stable
@@ -292,23 +300,35 @@ struct QualityPill: View {
             }
             .allowsHitTesting(false)
 
-            // Labels on top of both layers — when the format doesn't support
-            // a quality knob (PNG = lossless), surface that with a clear
-            // "Lossless" label instead of a stale "Quality XX%" reading.
-            HStack {
-                Text(disabled ? "Lossless" : "Quality")
-                    .font(.system(size: 13, weight: .semibold))
-                    .foregroundStyle(.white)
-                Spacer()
-                if !disabled {
-                    Text("\(Int(value * 100))%")
-                        .font(.system(size: 13, weight: .semibold))
-                        .monospacedDigit()
-                        .foregroundStyle(.white)
+            // Dual-layered labels for perfect contrast in both light + dark
+            // mode regardless of slider position:
+            //
+            //  • Base layer = labelColor (white in dark, near-black in light)
+            //    — readable against the gray track section to the RIGHT of
+            //    the fill.
+            //  • Top layer = pure white — readable against the accent fill
+            //    on the LEFT. It's clipped to the fill width via a leading
+            //    mask, so its visible portion exactly matches the blue area.
+            //
+            // IMPORTANT: both layers MUST sit at the same vertical position
+            // inside the ZStack. An earlier draft wrapped the top layer in
+            // a GeometryReader (to read the width for the mask) — but
+            // GeometryReader places its content at top-leading by default,
+            // while the bare base layer was vertically centered by the
+            // ZStack. The two ended up stacked instead of overlapping,
+            // making the text look duplicated. We use the known constant
+            // `pillWidth` for the mask width so both layers stay bare and
+            // share the same intrinsic centering.
+            labelsContent
+                .foregroundStyle(Theme.textPrimary)
+
+            labelsContent
+                .foregroundStyle(.white)
+                .mask(alignment: .leading) {
+                    Rectangle()
+                        .frame(width: max(0, pillWidth * value))
                 }
-            }
-            .padding(.horizontal, 14)
-            .allowsHitTesting(false)
+                .allowsHitTesting(false)
         }
         .frame(width: pillWidth, height: Theme.pillHeight)
         .clipShape(Capsule(style: .continuous))
@@ -333,6 +353,26 @@ struct QualityPill: View {
         if isDragging { return Theme.accentPress }
         if hovering   { return Theme.accentHover }
         return Theme.accent
+    }
+
+    /// The labels HStack ("Quality"/"Lossless" on the left, percentage on the
+    /// right). Rendered TWICE in the body — once in adaptive labelColor as
+    /// the base, once in pure white masked to the accent-fill width — so
+    /// each portion of the text sits on a colour with sufficient contrast.
+    /// Defining it once avoids duplicating font/spacing/padding constants.
+    private var labelsContent: some View {
+        HStack {
+            Text(disabled ? "Lossless" : "Quality")
+                .font(.system(size: 13, weight: .semibold))
+            Spacer()
+            if !disabled {
+                Text("\(Int(value * 100))%")
+                    .font(.system(size: 13, weight: .semibold))
+                    .monospacedDigit()
+            }
+        }
+        .padding(.horizontal, 14)
+        .allowsHitTesting(false)
     }
 }
 
@@ -443,7 +483,8 @@ struct MoreOptionsPopover: View {
                     .foregroundStyle(.secondary)
                 Spacer()
                 Text("v\(updater.currentVersion)")
-                    .font(.system(size: 11, weight: .semibold, design: .monospaced))
+                    .font(.system(size: 11, weight: .semibold))
+                    .monospacedDigit()
                     .foregroundStyle(.tertiary)
             }
         }
