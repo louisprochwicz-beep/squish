@@ -9,6 +9,22 @@
         <language>en</language>
 
         <item>
+            <title>Version 1.3</title>
+            <pubDate>Sat, 23 May 2026 11:36:02 +0000</pubDate>
+            <sparkle:version>1.3</sparkle:version>
+            <sparkle:shortVersionString>1.3</sparkle:shortVersionString>
+            <sparkle:minimumSystemVersion>14.0</sparkle:minimumSystemVersion>
+            <description><![CDATA[
+                <p>Remove backgrounds with one click using Apple Vision, drop PDFs and convert their pages to images, let AI suggest names from image content, and watch batches squish 3-4× faster thanks to a parallelised engine. Plus: fresh app icon, smoother card animations, tighter editor, and light-mode contrast fixes throughout.</p>
+            ]]></description>
+            <enclosure
+                url="https://github.com/louisprochwicz-beep/squish/releases/download/v1.3/Squish-1.3.dmg"
+                length="3559730"
+                type="application/octet-stream"
+                sparkle:edSignature="+pVb6NlAEUc21Kqmtz8IfHdUZgNRb3Z0ZeJrvTNa4fdINeqYNlHgfe3y+/7YPNypIAxy3RpNPREo+T0OzKHBAg==" />
+        </item>
+
+        <item>
             <title>Version 1.2</title>
             <pubDate>Fri, 22 May 2026 15:30:09 +0000</pubDate>
             <sparkle:version>1.2</sparkle:version>
