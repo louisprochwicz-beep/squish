@@ -14,6 +14,14 @@ struct ProcessOptions: Equatable {
     var rotationDegrees: Int
     var flipHorizontal: Bool
     var cropRectNormalized: CGRect?
+    /// When true, ImageProcessor.process() composites the source image
+    /// with the cached foreground mask (Apple Vision) and forces an
+    /// alpha-supporting output format. The actual mask CGImage lives
+    /// in BackgroundRemover's cache, keyed by `itemID`.
+    var removeBackground: Bool = false
+    /// ImageItem.id — required when `removeBackground` is true so the
+    /// pipeline can look up the cached mask. Nil otherwise.
+    var itemID: UUID? = nil
 }
 
 struct ProcessResult {
@@ -23,6 +31,92 @@ struct ProcessResult {
 }
 
 enum ImageProcessor {
+
+    // MARK: - Shared CIContext
+    //
+    // CIContext creation involves Metal device + command-queue setup and is
+    // surprisingly expensive (≈30-80 ms per init on M-series). Previously
+    // both `process()` and `makeEditedThumbnail()` allocated a fresh
+    // context on EVERY call, which dominated wall-clock time for small
+    // images and made the live estimate path lag during quality-slider
+    // drags.
+    //
+    // CIContext is thread-safe for `createCGImage`, so we can share one
+    // instance across the parallel batch in processAll(). `cacheIntermediates`
+    // keeps Metal program objects warm between renders.
+    static let sharedCIContext: CIContext = CIContext(options: [
+        .useSoftwareRenderer: false,
+        .cacheIntermediates: true
+    ])
+
+    // MARK: - Smart-resolution decode helper
+    //
+    // Decides between a full-resolution decode (when no downscaling will
+    // occur) and a thumbnail-resolution decode (when the target output
+    // dimensions are smaller than the source). Saves significant CPU +
+    // memory on the common "resize a 24 MP photo to 1080 wide" preset.
+    //
+    // The 1.5× headroom factor exists because:
+    //   • Rotation/crop may temporarily inflate the working size before
+    //     resize collapses it again.
+    //   • Lanczos resampling produces better output when the input has
+    //     a bit more pixel density than the strict target.
+    private static func decodedImage(
+        from src: CGImageSource,
+        sourceURL: URL,
+        options: ProcessOptions
+    ) throws -> CGImage {
+        // Probe source pixel size cheaply (no full decode).
+        let props = CGImageSourceCopyPropertiesAtIndex(src, 0, nil) as? [CFString: Any]
+        let srcW = (props?[kCGImagePropertyPixelWidth] as? Int) ?? 0
+        let srcH = (props?[kCGImagePropertyPixelHeight] as? Int) ?? 0
+        let maxSrc = max(srcW, srcH)
+
+        // Pick a decode budget. If user has W and/or H set, use the
+        // (post-rotation) predicted target; pad with 1.5× for headroom.
+        var decodeBudget: Int = maxSrc
+        if (options.targetWidth != nil || options.targetHeight != nil) && maxSrc > 0 {
+            let predicted = predictedSize(
+                from: CGSize(width: srcW, height: srcH),
+                crop: options.cropRectNormalized,
+                rotation: options.rotationDegrees,
+                targetW: options.targetWidth,
+                targetH: options.targetHeight
+            )
+            let target = Int(max(predicted.width, predicted.height).rounded())
+            // Only bother with a thumbnail decode if it's meaningfully smaller
+            // than the source (otherwise the full decode path is just as fast).
+            if target > 0 && target < maxSrc {
+                decodeBudget = Int(Double(target) * 1.5)
+            }
+        }
+
+        // Full-resolution path — no resize requested, or source already small.
+        if decodeBudget >= maxSrc {
+            guard let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+                throw NSError(domain: "Squish", code: 1, userInfo: [
+                    NSLocalizedDescriptionKey: "Cannot decode \(sourceURL.lastPathComponent)"
+                ])
+            }
+            return cg
+        }
+
+        // Thumbnail-resolution decode at the budgeted size.
+        let opts: [CFString: Any] = [
+            kCGImageSourceCreateThumbnailFromImageAlways: true,
+            kCGImageSourceCreateThumbnailWithTransform: true,
+            kCGImageSourceShouldCacheImmediately: true,
+            kCGImageSourceThumbnailMaxPixelSize: decodeBudget
+        ]
+        guard let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, opts as CFDictionary) else {
+            // Fall back to full decode if thumbnail extraction failed for any reason.
+            if let full = CGImageSourceCreateImageAtIndex(src, 0, nil) { return full }
+            throw NSError(domain: "Squish", code: 1, userInfo: [
+                NSLocalizedDescriptionKey: "Cannot decode \(sourceURL.lastPathComponent)"
+            ])
+        }
+        return cg
+    }
 
     // MARK: - Shared CIImage transform pipeline
     //
@@ -162,13 +256,10 @@ enum ImageProcessor {
             "--output", outURL.path,
             inURL.path
         ]
-        let errPipe = Pipe()
-        task.standardError = errPipe
-        task.standardOutput = Pipe()
-
+        // Drained subprocess runner — avoids the deadlock when pngquant
+        // writes lots of warnings to stderr on certain inputs.
         do {
-            try task.run()
-            task.waitUntilExit()
+            _ = try runSubprocess(task)
         } catch {
             return losslessData as Data
         }
@@ -237,22 +328,62 @@ enum ImageProcessor {
             pngURL.path,
             "-o", webpURL.path
         ]
-        let errPipe = Pipe()
-        task.standardError = errPipe
-        task.standardOutput = Pipe()
-
-        try task.run()
-        task.waitUntilExit()
+        let errText = try runSubprocess(task)
 
         guard task.terminationStatus == 0 else {
-            let errText = (try? errPipe.fileHandleForReading.readToEnd())
-                .flatMap { String(data: $0 ?? Data(), encoding: .utf8) } ?? "exit \(task.terminationStatus)"
             throw NSError(domain: "Squish", code: 23, userInfo: [
                 NSLocalizedDescriptionKey: "cwebp failed: \(errText)"
             ])
         }
 
         return try Data(contentsOf: webpURL)
+    }
+
+    // MARK: - Subprocess runner with proper stderr draining
+    //
+    // Why this exists: Process.standardError = Pipe() + waitUntilExit() is
+    // a classic UNIX pipe-deadlock trap. The OS only buffers ~64 KB per
+    // pipe; if cwebp/pngquant prints more than that to stderr (it does on
+    // some malformed inputs — verbose warnings), the child blocks on
+    // write, the parent blocks on waitUntilExit, and Squish freezes.
+    //
+    // Fix: install a readabilityHandler that drains the pipe to a Data
+    // buffer while the child is still running, so the kernel buffer is
+    // never full. Also drains stdout (cwebp writes to a file, so stdout
+    // is normally empty, but a future flag change could break that).
+    @discardableResult
+    private static func runSubprocess(_ task: Process) throws -> String {
+        let errPipe = Pipe()
+        let outPipe = Pipe()
+        task.standardError = errPipe
+        task.standardOutput = outPipe
+
+        // Async-drain stderr into a local accumulator.
+        let lock = NSLock()
+        var errBytes = Data()
+        errPipe.fileHandleForReading.readabilityHandler = { fh in
+            let chunk = fh.availableData
+            if chunk.isEmpty {
+                fh.readabilityHandler = nil // EOF
+                return
+            }
+            lock.lock(); errBytes.append(chunk); lock.unlock()
+        }
+        // Drain stdout too (just discard) so it can't fill its own buffer.
+        outPipe.fileHandleForReading.readabilityHandler = { fh in
+            let chunk = fh.availableData
+            if chunk.isEmpty { fh.readabilityHandler = nil }
+        }
+
+        try task.run()
+        task.waitUntilExit()
+
+        // Stop handlers — any bytes still in flight have been drained.
+        errPipe.fileHandleForReading.readabilityHandler = nil
+        outPipe.fileHandleForReading.readabilityHandler = nil
+
+        lock.lock(); let snapshot = errBytes; lock.unlock()
+        return String(data: snapshot, encoding: .utf8) ?? "exit \(task.terminationStatus)"
     }
 
     static func makeThumbnail(url: URL, maxPixel: Int) -> NSImage? {
@@ -279,12 +410,26 @@ enum ImageProcessor {
         let loadOpts: [CFString: Any] = [
             kCGImageSourceCreateThumbnailFromImageAlways: true,
             kCGImageSourceCreateThumbnailWithTransform: true,
-            kCGImageSourceShouldCacheImmediately: false,
+            // Cache the decoded pixels immediately — they're about to be
+            // pushed through a CI render so the source cache is useful.
+            // Matches `makeThumbnail` for consistency.
+            kCGImageSourceShouldCacheImmediately: true,
             kCGImageSourceThumbnailMaxPixelSize: maxPixel * 2
         ]
         guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cg = CGImageSourceCreateThumbnailAtIndex(src, 0, loadOpts as CFDictionary) else {
+              var cg = CGImageSourceCreateThumbnailAtIndex(src, 0, loadOpts as CFDictionary) else {
             return nil
+        }
+
+        // Apply the cached foreground mask BEFORE the geometric transforms
+        // so the card preview reflects the "remove background" choice in
+        // its persisted form. Without this, the editor would show the
+        // cut-out correctly, but Apply would leave the card showing the
+        // full image until the next Squish ran.
+        if options.removeBackground, let id = options.itemID,
+           let mask = BackgroundRemover.cachedMask(for: id),
+           let composed = BackgroundRemover.compose(image: cg, mask: mask) {
+            cg = composed
         }
 
         // Apply the same rotation → flip → crop pipeline as `process()` so the
@@ -296,16 +441,63 @@ enum ImageProcessor {
             cropRect: options.cropRectNormalized
         )
 
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        guard let outCG = context.createCGImage(ci, from: ci.extent) else { return nil }
+        guard let outCG = sharedCIContext.createCGImage(ci, from: ci.extent) else { return nil }
         return NSImage(cgImage: outCG, size: NSSize(width: outCG.width, height: outCG.height))
     }
 
     static func process(url: URL, options: ProcessOptions) throws -> ProcessResult {
-        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil),
-              let cg = CGImageSourceCreateImageAtIndex(src, 0, nil) else {
+        // autoreleasepool ensures every transient CGImage / CIImage / NSData
+        // allocated during this single image's pipeline is released BEFORE
+        // we move on to the next item in the batch. Without it, Swift's
+        // ARC + CoreFoundation interop can let pixel buffers linger until
+        // the next runloop tick, ballooning peak RSS to 2-3× the steady
+        // state on a batch.
+        return try autoreleasepool {
+            try processInternal(url: url, options: options)
+        }
+    }
+
+    private static func processInternal(url: URL, options: ProcessOptions) throws -> ProcessResult {
+        guard let src = CGImageSourceCreateWithURL(url as CFURL, nil) else {
             throw NSError(domain: "Squish", code: 1, userInfo: [NSLocalizedDescriptionKey: "Cannot decode image"])
         }
+
+        // -- Smart-resolution decode --------------------------------------
+        //
+        // When the user is downscaling (target W/H smaller than source) we
+        // ask ImageIO to decode at a reduced resolution directly, instead
+        // of materialising the full-resolution pixel buffer just to
+        // immediately scale it down. For a 6000×4000 JPEG going down to
+        // 800px wide, that's the difference between 100 MB and ~3 MB of
+        // ARGB pixels — both for memory peak AND for CPU cost (CIImage
+        // has to ship every pixel to the GPU).
+        //
+        // We over-decode by 1.5× so subsequent CIImage filtering has a
+        // bit of headroom (and Lanczos resampling has enough information
+        // to produce a high-quality output). When no resize is requested,
+        // OR when the source is already smaller than the target, we fall
+        // back to the full-resolution decode path.
+        var cg: CGImage = try decodedImage(from: src, sourceURL: url, options: options)
+
+        try Task.checkCancellation()
+
+        // -- Background removal (if requested) ----------------------------
+        //
+        // Apply BEFORE rotate/flip/crop so the mask (which lives in the
+        // ORIGINAL pixel-space) lines up correctly with the source. The
+        // subsequent CI transforms work on an RGBA image and naturally
+        // carry the alpha channel through unchanged.
+        //
+        // If the mask isn't yet cached, we silently skip — the caller
+        // (EditorSheet) is responsible for warming it before triggering
+        // a Squish. Better than blocking process() on an inference here.
+        if options.removeBackground, let id = options.itemID,
+           let mask = BackgroundRemover.cachedMask(for: id),
+           let composed = BackgroundRemover.compose(image: cg, mask: mask) {
+            cg = composed
+        }
+
+        try Task.checkCancellation()
 
         // Apply the rotation → flip → crop pipeline (shared helper).
         // Order matches what the editor preview shows, so the exported image
@@ -348,14 +540,23 @@ enum ImageProcessor {
             }
         }
 
-        // Render
-        let context = CIContext(options: [.useSoftwareRenderer: false])
-        guard let outCG = context.createCGImage(ci, from: ci.extent) else {
+        // Render — using the shared (warm) Metal context, see sharedCIContext above
+        guard let outCG = sharedCIContext.createCGImage(ci, from: ci.extent) else {
             throw NSError(domain: "Squish", code: 2, userInfo: [NSLocalizedDescriptionKey: "Render failed"])
         }
 
+        try Task.checkCancellation()
+
         // 5. Encode
-        let resolvedFormat = resolveFormat(options.format, sourceURL: url)
+        var resolvedFormat = resolveFormat(options.format, sourceURL: url)
+
+        // If we just stripped the background but the chosen format
+        // can't carry an alpha channel (JPEG), silently upgrade the
+        // export to PNG for THIS item only. JPEG would composite the
+        // transparency onto black — almost never what the user wants.
+        if options.removeBackground && !resolvedFormat.supportsAlpha {
+            resolvedFormat = .png
+        }
 
         // WEBP path → cwebp helper (ImageIO can't encode WEBP)
         if resolvedFormat == .webp {

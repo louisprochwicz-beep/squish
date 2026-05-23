@@ -100,12 +100,29 @@ struct ContentView: View {
 
     @ViewBuilder
     private var contentArea: some View {
-        if state.items.isEmpty {
-            DropZoneView(isCompact: false) { state.addItems(from: $0) }
-                .padding(Theme.Spacing.lg)
-        } else {
-            ImageGridView(onEdit: { editingItem = $0 })
+        // Crossfade between the dropzone and the grid so removing the
+        // LAST card doesn't pop the view back to empty state with no
+        // transition. Removing a card when others remain already
+        // animates nicely (the card's .transition fires inside the
+        // LazyVGrid), but with a single card the grid view itself is
+        // swapped out for the dropzone — which used to be instant.
+        //
+        // Why ZStack (not Group): Group is a logical grouping, not a
+        // structural container — SwiftUI doesn't maintain a stable
+        // identity for transitions to attach to when the conditional
+        // swaps. ZStack keeps a stable parent that both branches
+        // transition through, so the opacity fade actually fires.
+        ZStack {
+            if state.items.isEmpty {
+                DropZoneView(isCompact: false) { state.addItems(from: $0) }
+                    .padding(Theme.Spacing.lg)
+                    .transition(.opacity)
+            } else {
+                ImageGridView(onEdit: { editingItem = $0 })
+                    .transition(.opacity)
+            }
         }
+        .animation(.easeInOut(duration: 0.28), value: state.items.isEmpty)
     }
 
     private var dropOverlay: some View {
@@ -174,16 +191,23 @@ struct ContentView: View {
         state.isProcessing = true
         state.processingTask?.cancel()
         state.processingTask = Task {
-            var processedThisBatch: [ImageItem] = []
-            for item in pending {
-                if Task.isCancelled { break }
-                let ok = await processOne(item)
-                if ok { processedThisBatch.append(item) }
-            }
+            // Parallel batch — small TaskGroup cap to share the GPU/ANE
+            // and avoid memory blow-up on big batches. 4 wide is the sweet
+            // spot on M-series for image encode workloads (CPU + Metal
+            // render + subprocess for WEBP/PNG saturate ≈4 cores cleanly).
+            //
+            // Previously this loop was serial (await processOne in a for-
+            // loop), which meant a 20-image batch ran ~4× slower than
+            // necessary on Apple Silicon.
+            let processedIDs: Set<UUID> = await processBatch(pending, concurrency: 4)
+
             state.isProcessing = false
             state.processingTask = nil
             if Task.isCancelled { return }
 
+            // Build the success list in the original import order, so the
+            // toast / count is stable even though completion order varies.
+            let processedThisBatch = pending.filter { processedIDs.contains($0.id) }
             guard !processedThisBatch.isEmpty else { return }
             let processedBytesThisBatch = processedThisBatch.reduce(0) { $0 + ($1.processedBytes ?? 0) }
             let saved = max(0, originalBytesThisBatch - processedBytesThisBatch)
@@ -191,6 +215,42 @@ struct ContentView: View {
             let plural = count > 1 ? "s" : ""
             let savedStr = Theme.formatBytes(saved)
             state.showToast(.success("\(count) image\(plural) squished · saved \(savedStr)"))
+        }
+    }
+
+    /// Run `processOne` over every item in `items` with a bounded
+    /// concurrency window. Returns the set of items that finished
+    /// successfully. Honours cancellation — items not yet started when
+    /// the parent task is cancelled are skipped, and items mid-flight
+    /// bail out at the next checkCancellation() point in ImageProcessor.
+    private func processBatch(
+        _ items: [ImageItem],
+        concurrency: Int
+    ) async -> Set<UUID> {
+        await withTaskGroup(of: (UUID, Bool).self, returning: Set<UUID>.self) { group in
+            var iter = items.makeIterator()
+            var inFlight = 0
+
+            // Seed the group up to `concurrency`.
+            while inFlight < concurrency, let item = iter.next() {
+                group.addTask { (item.id, await processOne(item)) }
+                inFlight += 1
+            }
+
+            var done = Set<UUID>()
+            // As each task completes, schedule the next pending item — keeps
+            // exactly `concurrency` items in flight without launching all
+            // N tasks at once (which would balloon memory on big batches).
+            while let (id, ok) = await group.next() {
+                if ok { done.insert(id) }
+                inFlight -= 1
+                if Task.isCancelled { break }
+                if let next = iter.next() {
+                    group.addTask { (next.id, await processOne(next)) }
+                    inFlight += 1
+                }
+            }
+            return done
         }
     }
 
@@ -203,6 +263,10 @@ struct ContentView: View {
             let result = try await Task.detached(priority: .userInitiated) {
                 try ImageProcessor.process(url: url, options: opts)
             }.value
+            // Last cancel check before we mutate item state. Without this
+            // a Clear during a batch could lock in stale data on an item
+            // that's about to be removed.
+            try Task.checkCancellation()
             item.processedData = result.data
             item.processedBytes = result.data.count
             item.processedExtension = result.ext
@@ -212,6 +276,11 @@ struct ContentView: View {
             item.lastProcessedOptions = opts
             item.status = .done
             return true
+        } catch is CancellationError {
+            // Don't mark cancelled items as "failed" — they should remain
+            // pending so a fresh Squish picks them back up cleanly.
+            item.status = .pending
+            return false
         } catch {
             item.status = .failed(error.localizedDescription)
             return false

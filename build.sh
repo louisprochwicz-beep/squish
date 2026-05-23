@@ -76,6 +76,8 @@ xcrun swiftc \
     -framework ImageIO \
     -framework UniformTypeIdentifiers \
     -framework CoreGraphics \
+    -framework Vision \
+    -framework PDFKit \
     -Xlinker -rpath -Xlinker "@executable_path/../Frameworks" \
     -o "$APP_DIR/Contents/MacOS/$APP_NAME" \
     "${SOURCES[@]}"

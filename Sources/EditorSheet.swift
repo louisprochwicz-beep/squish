@@ -10,6 +10,8 @@ struct EditorSheet: View {
     @State private var flipH: Bool = false
     @State private var cropEnabled: Bool = false
     @State private var cropRect: CGRect = CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+    @State private var removeBG: Bool = false
+    @State private var bgInferring: Bool = false   // spinner while Vision runs
 
     var body: some View {
         VStack(spacing: 0) {
@@ -35,6 +37,13 @@ struct EditorSheet: View {
             if let r = item.cropRectNormalized {
                 cropRect = r
                 cropEnabled = true
+            }
+            // Initialise Remove BG from the persisted item state. If
+            // it's already on but the mask has been evicted (rare —
+            // would require manual cache clearing), regenerate.
+            removeBG = item.removeBackground
+            if removeBG && BackgroundRemover.cachedMask(for: item.id) == nil {
+                requestBackgroundMask()
             }
         }
     }
@@ -72,10 +81,27 @@ struct EditorSheet: View {
                     // pixel space, eliminating the letterboxing offset that
                     // caused Apply to produce a different crop than the preview.
                     ZStack {
+                        // When Remove BG is active, show a transparency
+                        // checkerboard behind the image so the user can
+                        // clearly see what's been cut out. The pattern is
+                        // a SwiftUI Canvas so it scales pixel-perfect.
+                        if removeBG && BackgroundRemover.cachedMask(for: item.id) != nil {
+                            TransparencyCheckerboard()
+                        }
                         Image(nsImage: displayed)
                             .resizable()
                         if cropEnabled {
                             CropOverlay(rect: $cropRect)
+                        }
+                        if bgInferring {
+                            // Soft scrim + spinner while Vision runs.
+                            Color.black.opacity(0.35)
+                            VStack(spacing: 8) {
+                                ProgressView().controlSize(.large).tint(.white)
+                                Text("Removing background…")
+                                    .font(.system(size: 12, weight: .semibold))
+                                    .foregroundStyle(.white)
+                            }
                         }
                     }
                     .aspectRatio(ratio, contentMode: .fit)
@@ -90,9 +116,41 @@ struct EditorSheet: View {
 
     private func displayedImage(_ img: NSImage) -> NSImage {
         var out = img
+
+        // Background removal happens FIRST — we mask the source pixels
+        // before rotation/flip so the alpha channel travels through the
+        // subsequent transforms naturally. The mask in the cache is at
+        // intermediate resolution (~2000 px) but `BackgroundRemover.compose`
+        // auto-rescales to match the preview thumbnail's smaller size.
+        if removeBG,
+           let cg = out.cgImage(forProposedRect: nil, context: nil, hints: nil),
+           let mask = BackgroundRemover.cachedMask(for: item.id),
+           let composed = BackgroundRemover.compose(image: cg, mask: mask) {
+            out = NSImage(
+                cgImage: composed,
+                size: NSSize(width: composed.width, height: composed.height)
+            )
+        }
+
         if rotation != 0 { out = out.rotated(by: CGFloat(rotation)) }
         if flipH { out = out.flippedHorizontally() }
         return out
+    }
+
+    /// Kicks off (or short-circuits to cache) the Vision mask request
+    /// for the current item. Drives `bgInferring` so the preview shows
+    /// a spinner overlay during inference. Called on first toggle ON.
+    private func requestBackgroundMask() {
+        guard !bgInferring else { return }
+        // Cache hit — nothing to do.
+        if BackgroundRemover.cachedMask(for: item.id) != nil { return }
+        bgInferring = true
+        Task {
+            _ = await BackgroundRemover.generateMask(for: item.sourceURL, itemID: item.id)
+            await MainActor.run {
+                bgInferring = false
+            }
+        }
     }
 
     // Single unified bottom bar: transform tools on the left, action buttons
@@ -117,7 +175,9 @@ struct EditorSheet: View {
 
             Divider().frame(height: 22).opacity(0.5)
 
-            // Crop tool + inline crop info when active
+            // Destructive transforms cluster: crop + remove background.
+            // Both change geometry/pixels of the exported image (vs the
+            // rotate/flip tools above which are reversible orientations).
             HStack(spacing: 6) {
                 editButton(cropEnabled ? "crop.rotate" : "crop",
                            help: "Crop", active: cropEnabled) {
@@ -136,6 +196,20 @@ struct EditorSheet: View {
                     .foregroundStyle(Theme.accent)
                     .pointerCursor()
                 }
+
+                // Remove background — on-device Apple Vision segmentation.
+                // First click runs inference (~400 ms), toggles after that
+                // are instant thanks to the per-item mask cache.
+                //
+                // `person.and.background.dotted` is an SF Symbol (macOS 14+)
+                // that literally depicts a subject silhouette over a dotted
+                // (i.e. transparent) background — the most semantic glyph
+                // available for "remove background".
+                editButton("person.and.background.dotted",
+                           help: removeBG ? "Restore background" : "Remove background (AI)",
+                           active: removeBG) {
+                    toggleRemoveBackground()
+                }
             }
 
             Spacer()
@@ -146,19 +220,27 @@ struct EditorSheet: View {
                 flipH = false
                 cropEnabled = false
                 cropRect = CGRect(x: 0.1, y: 0.1, width: 0.8, height: 0.8)
+                removeBG = false
             }
             .buttonStyle(.plain)
             .font(.system(size: 12, weight: .semibold))
             .foregroundStyle(Theme.textSecondary)
             .pointerCursor()
 
-            SecondaryPill(label: "Cancel") { onDismiss() }
-            PrimaryPill(label: "Apply") {
-                item.rotationDegrees = rotation
-                item.flipHorizontal = flipH
-                item.cropRectNormalized = cropEnabled ? cropRect : nil
-                onApply()
-                onDismiss()
+            // Cancel + Apply grouped in their own HStack so the gap
+            // between them (8pt) is tighter than the outer toolbar
+            // spacing (16pt). The two CTAs read as a single "decide"
+            // cluster rather than two distinct buttons floating apart.
+            HStack(spacing: 8) {
+                SecondaryPill(label: "Cancel") { onDismiss() }
+                PrimaryPill(label: "Apply") {
+                    item.rotationDegrees = rotation
+                    item.flipHorizontal = flipH
+                    item.cropRectNormalized = cropEnabled ? cropRect : nil
+                    item.removeBackground = removeBG
+                    onApply()
+                    onDismiss()
+                }
             }
         }
         .padding(16)
@@ -166,6 +248,80 @@ struct EditorSheet: View {
 
     private func editButton(_ symbol: String, help: String, active: Bool = false, action: @escaping () -> Void) -> some View {
         EditorIconButton(symbol: symbol, help: help, active: active, action: action)
+    }
+
+    /// Handle the Remove BG button. Two cases:
+    /// 1. Mask not yet computed → kick off async inference, then flip the
+    ///    toggle ON when the mask is in the cache. Spinner shown during.
+    /// 2. Mask already in cache → instant toggle (just flips the Bool).
+    /// On toggle OFF we DON'T evict the cache — toggling back ON should
+    /// be instant for the same image.
+    private func toggleRemoveBackground() {
+        // Off → On
+        if !removeBG {
+            if BackgroundRemover.cachedMask(for: item.id) != nil {
+                // Cache hit, instant.
+                removeBG = true
+            } else {
+                // Cold path: spinner + inference.
+                bgInferring = true
+                Task {
+                    let mask = await BackgroundRemover.generateMask(
+                        for: item.sourceURL,
+                        itemID: item.id
+                    )
+                    await MainActor.run {
+                        bgInferring = false
+                        if mask != nil {
+                            withAnimation(.easeOut(duration: 0.18)) {
+                                removeBG = true
+                            }
+                        }
+                        // If mask is nil, Vision found no subject — we
+                        // could surface a toast here, but for now silently
+                        // leave the toggle off. The button stays clickable
+                        // so the user can retry if they want.
+                    }
+                }
+            }
+        } else {
+            // On → Off (immediate).
+            withAnimation(.easeOut(duration: 0.18)) {
+                removeBG = false
+            }
+        }
+    }
+}
+
+// MARK: - Transparency checkerboard (alpha indicator)
+//
+// Classic 8×8 px checkerboard pattern shown behind images that have
+// transparent regions, so the user can clearly see what's been cut out
+// vs what's still opaque. Drawn with a SwiftUI Canvas so it stays sharp
+// at any preview size and adapts to light/dark mode automatically.
+struct TransparencyCheckerboard: View {
+    private let cell: CGFloat = 8
+
+    var body: some View {
+        Canvas { ctx, size in
+            // Two shades of the system "tertiary" gray, swapping per cell.
+            let dark  = Color(NSColor.tertiaryLabelColor).opacity(0.20)
+            let light = Color(NSColor.tertiaryLabelColor).opacity(0.10)
+            let cols = Int(ceil(size.width / cell)) + 1
+            let rows = Int(ceil(size.height / cell)) + 1
+            for row in 0..<rows {
+                for col in 0..<cols {
+                    let isDark = (row + col).isMultiple(of: 2)
+                    let rect = CGRect(
+                        x: CGFloat(col) * cell,
+                        y: CGFloat(row) * cell,
+                        width: cell,
+                        height: cell
+                    )
+                    ctx.fill(Path(rect), with: .color(isDark ? dark : light))
+                }
+            }
+        }
     }
 }
 
@@ -188,6 +344,7 @@ struct EditorSheet: View {
 // the editor + card show and what the exported file is named.
 struct EditableFilenameField: View {
     @ObservedObject var item: ImageItem
+    @EnvironmentObject var state: AppState
 
     @State private var isEditing = false
     @State private var draft: String = ""
@@ -232,13 +389,53 @@ struct EditableFilenameField: View {
                 }
             }
 
-            // Pencil hint — fades in on hover only when not already editing,
-            // so it doesn't compete with the active TextField for attention.
+            // Trailing affordances. Two icons surface on hover when not
+            // already editing:
+            //   ✏️ pencil    → tap anywhere on the chip (this includes
+            //                  the pencil glyph) enters manual edit mode.
+            //                  It's a visual hint, not a separate button.
+            //   ✨ sparkles  → independent button that asks Apple Vision
+            //                  to suggest a name. Shows a mini spinner
+            //                  while the request is in flight. Wrapped
+            //                  in its own Button so the tap is consumed
+            //                  there and does NOT bubble up to the chip's
+            //                  onTapGesture (which would otherwise enter
+            //                  edit mode at the same time).
             if hovering && !isEditing {
-                Image(systemName: "pencil")
-                    .font(.system(size: 11, weight: .medium))
-                    .foregroundStyle(Theme.textTertiary)
-                    .transition(.opacity)
+                HStack(spacing: 6) {
+                    Image(systemName: "pencil")
+                        .font(.system(size: 11, weight: .medium))
+                        .foregroundStyle(Theme.textTertiary)
+
+                    Button {
+                        state.renameWithAI(item)
+                    } label: {
+                        if item.aiRenaming {
+                            ProgressView()
+                                .controlSize(.mini)
+                        } else {
+                            // `sparkle` (singular) is the 4-pointed star
+                            // glyph Apple uses for Apple Intelligence in
+                            // macOS Sequoia — instantly reads as "AI" and
+                            // is more minimal than `sparkles` (plural) or
+                            // a 5-pointed `star.fill` (which looks like a
+                            // "favourite" toggle).
+                            Image(systemName: "sparkle")
+                                .font(.system(size: 11, weight: .medium))
+                                .foregroundStyle(Theme.accent)
+                        }
+                    }
+                    .buttonStyle(.plain)
+                    .disabled(item.aiRenaming)
+                    .onHover { isHovering in
+                        // Re-assert pointing-hand over the button area,
+                        // since the parent chip's onHover may have
+                        // reverted it for the surrounding region.
+                        updateCursor(isHovering)
+                    }
+                    .help("Rename this image with AI")
+                }
+                .transition(.opacity)
             }
         }
         .padding(.horizontal, 8)

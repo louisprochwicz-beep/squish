@@ -13,17 +13,36 @@ struct ImageGridView: View {
         ScrollView {
             LazyVGrid(columns: columns, alignment: .leading, spacing: 14) {
                 ForEach(state.items) { item in
-                    ImageCardView(item: item,
-                                  onEdit: { onEdit(item) },
-                                  onRemove: { state.removeItem(item) })
+                    // Insertion animation is driven PER ITEM via
+                    // item.hasAppeared (scheduled in AppState.addItems
+                    // with a small cascade delay). Using a per-item flag
+                    // rather than a ForEach-level transition lets us
+                    // stagger the cascade without re-animating existing
+                    // cards every time a new one is added.
+                    AppearingCard {
+                        ImageCardView(item: item,
+                                      onEdit: { onEdit(item) },
+                                      onRemove: { state.removeItem(item) })
+                    } visible: { item.hasAppeared }
+                        // Removal animation — a tight, near-instant fade
+                        // + slight shrink. Earlier this was a slow 0.35 s
+                        // spring with bounce, which felt like clicking ×
+                        // lagged. A snappier 0.20 s spring with almost
+                        // no damping bounce reads as "instant" while
+                        // still giving enough visual feedback that the
+                        // user knows what they clicked is gone.
                         .transition(.asymmetric(
-                            insertion: .opacity.combined(with: .scale(scale: 0.92)),
-                            removal: .opacity.combined(with: .scale(scale: 0.9))
+                            insertion: .identity,
+                            removal: .opacity.combined(with: .scale(scale: 0.85))
                         ))
                 }
             }
             .padding(Theme.Spacing.lg)
-            .animation(.spring(response: 0.35, dampingFraction: 0.85), value: state.items.map(\.id))
+            // Spring on the grid animates LAYOUT reflow when an item is
+            // removed (neighbouring cards slide into the gap) AND drives
+            // the .transition above. Tuned to ~200 ms response with
+            // minimal bounce so removal feels immediate.
+            .animation(.spring(response: 0.20, dampingFraction: 0.92), value: state.items.map(\.id))
         }
         .scrollIndicators(.automatic)
     }
@@ -95,21 +114,37 @@ struct ImageCardView: View {
     // MARK: top row (filename + hover actions)
     private var topRow: some View {
         HStack(alignment: .top) {
-            Text(item.displayName)
-                .font(.system(size: 11, weight: .semibold))
-                .lineLimit(1)
-                .truncationMode(.middle)
-                .padding(.horizontal, 8)
-                .padding(.vertical, 5)
-                .background(
-                    RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
-                        .fill(Theme.scrimDark55)
-                )
-                .overlay(
-                    RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
-                        .strokeBorder(Theme.overlayLight10, lineWidth: 0.5)
-                )
-                .foregroundStyle(.white)
+            // While the AI rename request is in flight for THIS item,
+            // replace the filename with a mini spinner + "Naming…" so
+            // the user has per-card progress feedback. The chip
+            // dimensions stay close to the filename's so the card
+            // doesn't visibly reflow.
+            Group {
+                if item.aiRenaming {
+                    HStack(spacing: 5) {
+                        ProgressView()
+                            .controlSize(.mini)
+                            .tint(.white)
+                        Text("Naming with AI…")
+                    }
+                } else {
+                    Text(item.displayName)
+                }
+            }
+            .font(.system(size: 11, weight: .semibold))
+            .lineLimit(1)
+            .truncationMode(.middle)
+            .padding(.horizontal, 8)
+            .padding(.vertical, 5)
+            .background(
+                RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
+                    .fill(Theme.scrimDark55)
+            )
+            .overlay(
+                RoundedRectangle(cornerRadius: Theme.smallRadius, style: .continuous)
+                    .strokeBorder(Theme.overlayLight10, lineWidth: 0.5)
+            )
+            .foregroundStyle(.white)
 
             Spacer(minLength: 6)
 
@@ -283,5 +318,36 @@ struct BadgeStack: View {
             RoundedRectangle(cornerRadius: Theme.badgeRadius, style: .continuous)
                 .strokeBorder(Theme.overlayLight10, lineWidth: 0.5)
         )
+    }
+}
+
+// MARK: - Card entrance animation wrapper
+//
+// Drives the per-card "appear" animation off a Bool the parent passes in
+// (typically `item.hasAppeared`). The card renders invisible + slightly
+// shrunk on first paint; when the Bool flips to true (with a stagger
+// scheduled in AppState.addItems) the card springs into place.
+//
+// Why a wrapper instead of attaching modifiers directly on ImageCardView:
+//   1. Keeps the animation concerns in ONE place, easy to tweak.
+//   2. Decouples the visual "appear" state from the card's own internal
+//      state (hover, edit mode, etc.) so we never re-trigger entrance
+//      animations on a re-render.
+//   3. Plays nicely with the LazyVGrid's removal transition — the grid
+//      sees the wrapper as a single child it can transition.
+struct AppearingCard<Content: View>: View {
+    @ViewBuilder let content: () -> Content
+    let visible: () -> Bool
+
+    var body: some View {
+        content()
+            .opacity(visible() ? 1 : 0)
+            .scaleEffect(visible() ? 1 : 0.93)
+            // Tuned to be just-perceptible: a tiny scale lift (7 %) +
+            // opacity, on a snappy spring with minimal bounce. Total
+            // perceived duration ≈ 250 ms so the card "lands" right
+            // after the user releases their drop — quick enough to
+            // feel responsive, slow enough that you register it.
+            .animation(.spring(response: 0.30, dampingFraction: 0.88), value: visible())
     }
 }

@@ -411,6 +411,10 @@ struct MoreOptionsPopover: View {
 
     var body: some View {
         VStack(alignment: .leading, spacing: 12) {
+            AIRenameRow()
+
+            Divider()
+
             HStack(spacing: 10) {
                 Image(systemName: state.isDarkMode ? "moon.fill" : "sun.max.fill")
                     .foregroundStyle(Theme.accent)
@@ -490,6 +494,84 @@ struct MoreOptionsPopover: View {
         }
         .padding(14)
         .frame(width: 300)
+    }
+}
+
+// MARK: - AI rename row (featured action in the ••• popover)
+//
+// Triggers AppState.renameAllWithAI() — a batch pass that classifies
+// every imported image with Apple Vision on-device and rewrites each
+// item's customBaseName to a clean, content-derived label.
+//
+// Three visible states, in priority order:
+//   • running     → progress spinner + "Classifying X images…"
+//   • empty stack → disabled, "Add images first" subtitle
+//   • idle        → primary call-to-action with a chevron affordance
+//
+// The popover deliberately stays open while the request runs — Apple
+// Vision is fast enough (~100 ms / image on M-series) that the user
+// gets immediate feedback. They can also dismiss the popover by
+// clicking outside, at which point progress is still visible on each
+// card via the per-item spinner.
+struct AIRenameRow: View {
+    @EnvironmentObject var state: AppState
+    @State private var hovering = false
+
+    private var disabled: Bool {
+        state.items.isEmpty || state.isAIRenaming
+    }
+
+    private var subtitle: String {
+        if state.items.isEmpty { return "Add images first" }
+        if state.isAIRenaming {
+            let n = state.items.count
+            return "Classifying \(n) image\(n > 1 ? "s" : "")…"
+        }
+        return "Auto-name images by content"
+    }
+
+    var body: some View {
+        Button {
+            state.renameAllWithAI()
+        } label: {
+            HStack(spacing: 10) {
+                Image(systemName: "wand.and.stars")
+                    .foregroundStyle(disabled ? Theme.textTertiary : Theme.accent)
+                    .frame(width: 18)
+                VStack(alignment: .leading, spacing: 1) {
+                    Text("Rename with AI")
+                        .font(.system(size: 12, weight: .semibold))
+                        .foregroundStyle(disabled && !state.isAIRenaming
+                                         ? Theme.textTertiary
+                                         : Theme.textPrimary)
+                        .lineLimit(1)
+                    Text(subtitle)
+                        .font(.system(size: 10))
+                        .foregroundStyle(.secondary)
+                        .lineLimit(1)
+                }
+                Spacer(minLength: 12)
+                if state.isAIRenaming {
+                    ProgressView()
+                        .controlSize(.small)
+                } else {
+                    Image(systemName: "arrow.right.circle.fill")
+                        .font(.system(size: 16))
+                        .foregroundStyle(disabled ? Theme.textTertiary : Theme.accent)
+                }
+            }
+            .padding(.horizontal, 10)
+            .padding(.vertical, 7)
+            .background(
+                RoundedRectangle(cornerRadius: 7, style: .continuous)
+                    .fill(hovering && !disabled ? Theme.surface3 : Color.clear)
+            )
+            .contentShape(Rectangle())
+        }
+        .buttonStyle(.plain)
+        .disabled(disabled)
+        .onHover { hovering = $0; if !disabled { updateCursor($0) } }
+        .help("Use Apple's on-device classifier to suggest names from each image's content")
     }
 }
 

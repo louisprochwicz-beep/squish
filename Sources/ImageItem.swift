@@ -40,6 +40,20 @@ final class ImageItem: ObservableObject, Identifiable {
     /// basename. The source file on disk is NEVER renamed; this only
     /// affects what the editor & card show, and the exported file's name.
     @Published var customBaseName: String? = nil
+    /// True while an AI rename request is in flight for this item, so
+    /// the card can render a subtle spinner over the filename overlay.
+    @Published var aiRenaming: Bool = false
+    /// Drives the entrance animation. Starts false on init so the card
+    /// renders invisible/scaled-down on first paint; AppState flips it
+    /// to true with a small per-item stagger so a batch of dropped
+    /// images cascades in instead of appearing all at once.
+    @Published var hasAppeared: Bool = false
+    /// When true, the export pipeline strips the background using
+    /// Apple Vision's foreground segmentation model and exports the
+    /// result with an alpha channel (force-switching to PNG/WEBP if
+    /// the user picked JPEG). Toggled from the editor sheet. The
+    /// actual mask is cached in BackgroundRemover keyed by `id`.
+    @Published var removeBackground: Bool = false
 
     init?(url: URL) {
         guard let attrs = try? FileManager.default.attributesOfItem(atPath: url.path),

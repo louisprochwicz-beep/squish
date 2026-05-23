@@ -9,6 +9,10 @@ struct SquishApp: App {
     init() {
         NSWindow.allowsAutomaticWindowTabbing = false
         Self.installClickOutsideToDefocus()
+        // Pre-load the Vision foreground-mask model in the background so
+        // the user's first "Remove background" click in the editor pays
+        // 0 ms of model init cost. ~200 ms of background work.
+        BackgroundRemover.warmUp()
     }
 
     /// Stored token so we can de-register the monitor if `installClickOutsideToDefocus`
@@ -72,7 +76,10 @@ struct SquishApp: App {
             ContentView()
                 .environmentObject(state)
                 .environmentObject(updater)
-                .frame(minWidth: 740, minHeight: 700)
+                // minHeight = 580 keeps the editor sheet (532pt) comfortably
+                // centred with ~24pt scrim each side. Going lower would
+                // start to crowd the modal against the window edges.
+                .frame(minWidth: 740, minHeight: 580)
                 .preferredColorScheme(state.isDarkMode ? .dark : .light)
                 .background(WindowAccessor { window in
                     window.titlebarAppearsTransparent = true
